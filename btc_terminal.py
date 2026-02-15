@@ -5,7 +5,7 @@ Shows live prices from:
   - Coinbase WebSocket: BTC, ETH, SOL, XRP
   - Chainlink oracles: BTC, ETH, SOL, XRP (Ethereum mainnet)
 
-Plus cross-source averages and spreads per asset.
+Organized by source, USD pairs on top.
 
 Usage:  python3 btc_terminal.py
 """
@@ -75,8 +75,6 @@ WHITE = "\033[97m"
 MAGENTA = "\033[35m"
 BLUE = "\033[34m"
 
-ASSET_COLORS = {"BTC": YELLOW, "ETH": BLUE, "SOL": MAGENTA, "XRP": GREEN}
-
 
 class PriceStore:
     def __init__(self):
@@ -101,7 +99,6 @@ store = PriceStore()
 # ── Binance WS (combined stream) ─────────────────────────────────
 
 async def binance_ws():
-    # Reverse lookup: btcusdt -> BTC
     sym_to_asset = {v: k for k, v in BINANCE_SYMBOLS.items()}
     while True:
         try:
@@ -139,8 +136,7 @@ async def coinbase_ws():
                     asset = COINBASE_PRODUCTS.get(product)
                     if not asset:
                         continue
-                    is_usd = product.endswith("-USD")
-                    suffix = "usd" if is_usd else "usdt"
+                    suffix = "usd" if product.endswith("-USD") else "usdt"
                     bid = float(data.get("best_bid", 0))
                     ask = float(data.get("best_ask", 0))
                     if bid > 0 and ask > 0:
@@ -210,40 +206,15 @@ def fmt_age(seconds):
         return f"{RED}{seconds:.0f}s{RESET}"
 
 
-def render_asset(asset):
-    """Render price rows for one asset."""
-    lines = []
-    color = ASSET_COLORS.get(asset, WHITE)
-
-    lines.append(f"  {BOLD}{color}  {asset}{RESET}")
-    lines.append(f"  {DIM}  {'─' * 56}{RESET}")
-
-    rows = [
-        ("Binance", f"{asset}/USDT", f"binance_{asset}"),
-        ("Coinbase", f"{asset}/USD", f"coinbase_{asset}_usd"),
-        ("Coinbase", f"{asset}/USDT", f"coinbase_{asset}_usdt"),
-        ("Chainlink", f"{asset}/USD", f"chainlink_{asset}"),
-    ]
-
-    prices_for_avg = []
-    for source, pair, key in rows:
-        entry = store.get(key)
-        if entry:
-            price_str = fmt_price(entry[0])
-            age_str = fmt_age(store.age(key))
-            prices_for_avg.append(entry[0])
-        else:
-            price_str = f"{'—':>13}"
-            age_str = "waiting..."
-        lines.append(f"  {color}  {source:<12}{RESET} {pair:<13} {WHITE}{price_str}{RESET}   {age_str}")
-
-    # Cross-source average
-    if len(prices_for_avg) >= 2:
-        avg = sum(prices_for_avg) / len(prices_for_avg)
-        spread = max(prices_for_avg) - min(prices_for_avg)
-        lines.append(f"  {DIM}  {'':12} {'AVG':<13} {WHITE}{fmt_price(avg)}{RESET}   {DIM}spread ${spread:,.2f}  ({len(prices_for_avg)} src){RESET}")
-
-    return lines
+def render_row(coin, pair, key, color):
+    entry = store.get(key)
+    if entry:
+        price_str = fmt_price(entry[0])
+        age_str = fmt_age(store.age(key))
+    else:
+        price_str = f"{'—':>13}"
+        age_str = "waiting..."
+    return f"  {color}  {coin:<6}{RESET} {pair:<13} {WHITE}{price_str}{RESET}   {age_str}"
 
 
 def render():
@@ -253,11 +224,33 @@ def render():
     lines.append(f"  {BOLD}{CYAN}   CRYPTO PRICE TERMINAL  —  Binance / Coinbase / Chainlink{RESET}")
     lines.append(f"  {BOLD}{CYAN}{'=' * 60}{RESET}")
     lines.append("")
-    lines.append(f"  {BOLD}{WHITE}  {'SOURCE':<12} {'PAIR':<13} {'PRICE':>13}   AGE{RESET}")
+    lines.append(f"  {BOLD}{WHITE}  {'COIN':<6} {'PAIR':<13} {'PRICE':>13}   AGE{RESET}")
 
+    # ── USD PAIRS (priority) ─────────────────────────────────────
+    lines.append("")
+    lines.append(f"  {BOLD}{MAGENTA}  COINBASE  {DIM}USD{RESET}")
+    lines.append(f"  {DIM}  {'─' * 50}{RESET}")
     for asset in ASSETS:
-        lines.append("")
-        lines.extend(render_asset(asset))
+        lines.append(render_row(asset, f"{asset}/USD", f"coinbase_{asset}_usd", MAGENTA))
+
+    lines.append("")
+    lines.append(f"  {BOLD}{YELLOW}  CHAINLINK  {DIM}USD{RESET}")
+    lines.append(f"  {DIM}  {'─' * 50}{RESET}")
+    for asset in ASSETS:
+        lines.append(render_row(asset, f"{asset}/USD", f"chainlink_{asset}", YELLOW))
+
+    # ── USDT PAIRS ───────────────────────────────────────────────
+    lines.append("")
+    lines.append(f"  {BOLD}{GREEN}  BINANCE  {DIM}USDT{RESET}")
+    lines.append(f"  {DIM}  {'─' * 50}{RESET}")
+    for asset in ASSETS:
+        lines.append(render_row(asset, f"{asset}/USDT", f"binance_{asset}", GREEN))
+
+    lines.append("")
+    lines.append(f"  {BOLD}{MAGENTA}  COINBASE  {DIM}USDT{RESET}")
+    lines.append(f"  {DIM}  {'─' * 50}{RESET}")
+    for asset in ASSETS:
+        lines.append(render_row(asset, f"{asset}/USDT", f"coinbase_{asset}_usdt", MAGENTA))
 
     lines.append("")
     lines.append(f"  {DIM}  Updated: {time.strftime('%H:%M:%S')}  |  Ctrl+C to exit{RESET}")
