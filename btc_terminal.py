@@ -1,11 +1,10 @@
-"""Real-time crypto price terminal — Binance + Coinbase + Chainlink.
+"""Real-time crypto price terminal — Binance + Coinbase.
 
 Shows live prices from:
-  - Binance WebSocket: BTC, ETH, SOL, XRP
-  - Coinbase WebSocket: BTC, ETH, SOL, XRP
-  - Chainlink oracles: BTC, ETH, SOL, XRP (Ethereum mainnet)
+  - Coinbase WebSocket: BTC, ETH, SOL, XRP (USD + USDT)
+  - Binance WebSocket: BTC, ETH, SOL, XRP (USDT)
 
-Organized by source, USD pairs on top.
+Plus a self-playing snake game at the bottom.
 
 Usage:  python3 btc_terminal.py
 """
@@ -14,16 +13,12 @@ import asyncio
 import json
 import time
 import sys
+import random
 
 try:
     import websockets
 except ImportError:
     sys.exit("pip install websockets")
-
-try:
-    import aiohttp
-except ImportError:
-    sys.exit("pip install aiohttp")
 
 
 # ── Assets ───────────────────────────────────────────────────────
@@ -43,25 +38,13 @@ COINBASE_PRODUCTS = {
     "XRP-USD": "XRP", "XRP-USDT": "XRP",
 }
 
-# Chainlink price feed addresses on Ethereum mainnet
-CHAINLINK_FEEDS = {
-    "BTC": "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c",
-    "ETH": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
-    "SOL": "0x4ffC43a60e009B551865A93d232E33Fce9f01507",
-    "XRP": "0xCed2660c6Dd1Ffd856A5A82C67f3482d88C50b12",
-}
-
-LATEST_ROUND_DATA = "0xfeaf968c"
-ETH_RPC = "https://eth.llamarpc.com"
-CHAINLINK_POLL_INTERVAL = 5
-
 # ── WebSocket URLs ───────────────────────────────────────────────
 BINANCE_STREAMS = "/".join(f"{s}@trade" for s in BINANCE_SYMBOLS.values())
 BINANCE_WS = f"wss://stream.binance.com:9443/stream?streams={BINANCE_STREAMS}"
 COINBASE_WS = "wss://ws-feed.exchange.coinbase.com"
 
 # ── Display ──────────────────────────────────────────────────────
-REFRESH_MS = 500
+REFRESH_MS = 150  # faster for smooth snake
 
 # ANSI colors
 RESET = "\033[0m"
@@ -74,6 +57,8 @@ YELLOW = "\033[33m"
 WHITE = "\033[97m"
 MAGENTA = "\033[35m"
 BLUE = "\033[34m"
+BG_GREEN = "\033[42m"
+BG_RED = "\033[41m"
 
 
 class PriceStore:
@@ -94,6 +79,135 @@ class PriceStore:
 
 
 store = PriceStore()
+
+
+# ── Snake Game ────────────────────────────────────────────────────
+
+class Snake:
+    WIDTH = 56
+    HEIGHT = 12
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        mid_y = self.HEIGHT // 2
+        mid_x = self.WIDTH // 4
+        self.body = [(mid_y, mid_x + 2), (mid_y, mid_x + 1), (mid_y, mid_x)]
+        self.direction = (0, 1)  # moving right
+        self.food = None
+        self.score = 0
+        self.high_score = 0
+        self.place_food()
+        self.tick_count = 0
+
+    def place_food(self):
+        occupied = set(self.body)
+        attempts = 0
+        while attempts < 200:
+            r = random.randint(0, self.HEIGHT - 1)
+            c = random.randint(0, self.WIDTH - 1)
+            if (r, c) not in occupied:
+                self.food = (r, c)
+                return
+            attempts += 1
+        self.food = (0, 0)
+
+    def ai_direction(self):
+        """Simple AI: chase food, avoid walls and self."""
+        head = self.body[0]
+        hr, hc = head
+        fr, fc = self.food
+
+        occupied = set(self.body[:-1])
+
+        # Possible moves
+        moves = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+        # Don't reverse
+        reverse = (-self.direction[0], -self.direction[1])
+        moves = [m for m in moves if m != reverse]
+
+        def is_safe(dr, dc):
+            nr, nc = hr + dr, hc + dc
+            return (0 <= nr < self.HEIGHT and 0 <= nc < self.WIDTH
+                    and (nr, nc) not in occupied)
+
+        safe = [m for m in moves if is_safe(*m)]
+        if not safe:
+            return self.direction  # doomed
+
+        # Prefer moves toward food
+        def dist_to_food(dr, dc):
+            nr, nc = hr + dr, hc + dc
+            return abs(nr - fr) + abs(nc - fc)
+
+        safe.sort(key=lambda m: dist_to_food(*m))
+        return safe[0]
+
+    def tick(self):
+        self.tick_count += 1
+        # Only move snake every 2 render frames for readable speed
+        if self.tick_count % 2 != 0:
+            return
+
+        self.direction = self.ai_direction()
+        hr, hc = self.body[0]
+        dr, dc = self.direction
+        new_head = (hr + dr, hc + dc)
+
+        # Wall or self collision = reset
+        if (new_head[0] < 0 or new_head[0] >= self.HEIGHT
+                or new_head[1] < 0 or new_head[1] >= self.WIDTH
+                or new_head in set(self.body)):
+            if self.score > self.high_score:
+                self.high_score = self.score
+            self.reset()
+            return
+
+        self.body.insert(0, new_head)
+
+        if new_head == self.food:
+            self.score += 1
+            self.place_food()
+        else:
+            self.body.pop()
+
+    def render(self):
+        grid = [[" "] * self.WIDTH for _ in range(self.HEIGHT)]
+
+        # Food
+        if self.food:
+            fr, fc = self.food
+            grid[fr][fc] = "◆"
+
+        # Body
+        for i, (r, c) in enumerate(self.body):
+            if i == 0:
+                grid[r][c] = "█"  # head
+            else:
+                grid[r][c] = "▓"
+
+        lines = []
+        border_color = GREEN if self.score < 10 else YELLOW if self.score < 25 else CYAN
+        top = f"  {border_color}┌{'─' * self.WIDTH}┐{RESET}  {DIM}score: {WHITE}{self.score}{RESET}  {DIM}hi: {WHITE}{self.high_score}{RESET}"
+        lines.append(top)
+        for row in grid:
+            row_str = ""
+            for ch in row:
+                if ch == "█":
+                    row_str += f"{GREEN}{ch}{RESET}"
+                elif ch == "▓":
+                    row_str += f"{GREEN}{DIM}{ch}{RESET}"
+                elif ch == "◆":
+                    row_str += f"{RED}{BOLD}{ch}{RESET}"
+                else:
+                    row_str += ch
+            lines.append(f"  {border_color}│{RESET}{row_str}{border_color}│{RESET}")
+        lines.append(f"  {border_color}└{'─' * self.WIDTH}┘{RESET}")
+        return lines
+
+
+snake = Snake()
 
 
 # ── Binance WS (combined stream) ─────────────────────────────────
@@ -149,41 +263,6 @@ async def coinbase_ws():
             await asyncio.sleep(3)
 
 
-# ── Chainlink oracles via eth_call ────────────────────────────────
-
-async def chainlink_poller():
-    async with aiohttp.ClientSession() as session:
-        while True:
-            for asset, address in CHAINLINK_FEEDS.items():
-                try:
-                    payload = {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "eth_call",
-                        "params": [
-                            {"to": address, "data": LATEST_ROUND_DATA},
-                            "latest",
-                        ],
-                    }
-                    async with session.post(
-                        ETH_RPC,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=10),
-                    ) as resp:
-                        result = await resp.json()
-                        hex_data = result["result"]
-                        answer_hex = hex_data[66:130]
-                        answer_int = int(answer_hex, 16)
-                        if answer_int >= 2**255:
-                            answer_int -= 2**256
-                        price = answer_int / 1e8
-                        if price > 0:
-                            store.update(f"chainlink_{asset}", price)
-                except Exception as e:
-                    print(f"\r{DIM}Chainlink {asset} error: {e}{RESET}", end="", flush=True)
-            await asyncio.sleep(CHAINLINK_POLL_INTERVAL)
-
-
 # ── Terminal display ──────────────────────────────────────────────
 
 def fmt_price(price, width=12):
@@ -218,10 +297,12 @@ def render_row(coin, pair, key, color):
 
 
 def render():
+    snake.tick()
+
     lines = []
     lines.append("")
     lines.append(f"  {BOLD}{CYAN}{'=' * 60}{RESET}")
-    lines.append(f"  {BOLD}{CYAN}   CRYPTO PRICE TERMINAL  —  Binance / Coinbase / Chainlink{RESET}")
+    lines.append(f"  {BOLD}{CYAN}     CRYPTO PRICE TERMINAL  —  Coinbase / Binance{RESET}")
     lines.append(f"  {BOLD}{CYAN}{'=' * 60}{RESET}")
     lines.append("")
     lines.append(f"  {BOLD}{WHITE}  {'COIN':<6} {'PAIR':<13} {'PRICE':>13}   AGE{RESET}")
@@ -232,12 +313,6 @@ def render():
     lines.append(f"  {DIM}  {'─' * 50}{RESET}")
     for asset in ASSETS:
         lines.append(render_row(asset, f"{asset}/USD", f"coinbase_{asset}_usd", MAGENTA))
-
-    lines.append("")
-    lines.append(f"  {BOLD}{YELLOW}  CHAINLINK  {DIM}USD{RESET}")
-    lines.append(f"  {DIM}  {'─' * 50}{RESET}")
-    for asset in ASSETS:
-        lines.append(render_row(asset, f"{asset}/USD", f"chainlink_{asset}", YELLOW))
 
     # ── USDT PAIRS ───────────────────────────────────────────────
     lines.append("")
@@ -251,6 +326,10 @@ def render():
     lines.append(f"  {DIM}  {'─' * 50}{RESET}")
     for asset in ASSETS:
         lines.append(render_row(asset, f"{asset}/USDT", f"coinbase_{asset}_usdt", MAGENTA))
+
+    # ── Snake ────────────────────────────────────────────────────
+    lines.append("")
+    lines.extend(snake.render())
 
     lines.append("")
     lines.append(f"  {DIM}  Updated: {time.strftime('%H:%M:%S')}  |  Ctrl+C to exit{RESET}")
@@ -271,12 +350,11 @@ async def display_loop():
 
 async def main():
     print(f"{CYAN}Starting Crypto Price Terminal...{RESET}")
-    print(f"{DIM}Connecting to Binance + Coinbase + Chainlink...{RESET}")
+    print(f"{DIM}Connecting to Coinbase + Binance...{RESET}")
 
     await asyncio.gather(
         binance_ws(),
         coinbase_ws(),
-        chainlink_poller(),
         display_loop(),
     )
 
